@@ -1,27 +1,130 @@
-# Organization Q&A API
+# Organization Voice Q&A API
 
-From the repository root, put your Groq API key in `.env` and keep the generated `BACKEND_ADMIN_KEY` private. The default Groq model is `openai/gpt-oss-20b`. Set `GROQ_MODEL` to use another model that supports JSON mode.
+Multi-tenant **FastAPI** backend for document Q&A with zero-shot Indian-language voice cloning.
+
+| Component | Technology |
+|---|---|
+| Voice cloning (TTS) | **Dhee-Indic-F5** (XTTS-v2 fallback) |
+| Speech-to-text | **IndicConformer** (local) / **Groq Whisper** (auto-detect) |
+| Retrieval | **SQLite FTS5** |
+| Answer generation | **Groq LLM** with offline fallback |
+| Caching | Persistent **Q&A + WAV** cache |
+
+---
+
+## Table of Contents
+
+1. [Environment Variables](#1-environment-variables)
+2. [Installation & Setup](#2-installation--setup)
+3. [Start the Backend](#3-start-the-backend)
+4. [API Endpoints & Workflow](#4-api-endpoints--workflow)
+5. [Supported Languages](#5-supported-languages)
+6. [Key Features for Live Demos](#6-key-features-for-live-demos)
+
+---
+
+## 1. Environment Variables
+
+Create a `.env` file in the project root:
+
+```env
+GROQ_API_KEY=your_groq_api_key_here
+BACKEND_ADMIN_KEY=choose_a_strong_admin_secret
+GROQ_MODEL=openai/gpt-oss-20b
+GROQ_STT_MODEL=whisper-large-v3-turbo
+DHEE_NFE_STEP=16
+```
+
+| Variable | Description |
+|---|---|
+| `GROQ_API_KEY` | API key used for the Groq LLM and Whisper STT |
+| `BACKEND_ADMIN_KEY` | Admin secret required to create organizations |
+| `GROQ_MODEL` | Groq LLM used to generate answers |
+| `GROQ_STT_MODEL` | Groq Whisper model used for auto-detect transcription |
+| `DHEE_NFE_STEP` | Number of function evaluation steps for Dhee-Indic-F5 synthesis |
+
+---
+
+## 2. Installation & Setup
 
 ```bash
 conda activate minor-project
 python -m pip install -r backend/requirements.txt
-python -m uvicorn backend.main:app --reload --port 8000
+huggingface-cli login
 ```
 
-Open [Swagger UI](http://127.0.0.1:8000/docs). Use **Authorize** to set the bearer key required for each step.
+> **Note:** Accept the gated repository terms on [ai4bharat/IndicF5](https://huggingface.co/ai4bharat/IndicF5) **before** running `huggingface-cli login`, so that `checkpoints/vocab.txt` can be downloaded on first TTS use.
 
-1. With `BACKEND_ADMIN_KEY`, call `POST /v1/organizations` with `{"name":"Example Organization"}`. Save the returned upload and query keys. The API shows them only when creating the organization.
-2. With the organization's upload key, call `POST /v1/documents` and send the file in the multipart field `file`. Upload a searchable PDF or a UTF-8 TXT or Markdown transcript. The file limit is 10 MiB. Scanned PDFs require OCR before upload.
-3. With the organization's query key, call `POST /v1/ask` with `{"question":"What are the office hours?"}`. The response contains plain answer text and supporting excerpts with filenames and PDF page numbers when available. Keep the query key on the organization's server when integrating with a public website.
+---
 
-Document text persists in `backend/storage/rag.sqlite3`. For small document collections, the backend sends all extracted text in excerpts to Groq. Larger collections use SQLite FTS5 to select excerpts for the question. Answers must cite the supplied excerpts. This phase returns text for the future voice-cloning integration.
+## 3. Start the Backend
 
-The organization's query key also authorizes `POST /v1/transcribe`. Send an audio file in the multipart field `file` to receive the transcript as `{"text":"..."}`. Audio is sent to Groq's multilingual Whisper model, with automatic language detection. Set `GROQ_STT_MODEL` to change the model. For larger document collections, the API can rewrite search terms in the document language and retry when the first search yields no supported answer.
+```bash
+python -m uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000
+```
 
-## Organization voice
+Open Swagger UI at <http://127.0.0.1:8000/docs> and use **Authorize** to set the bearer token for each step.
 
-Install the voice dependencies with `python -m pip install -r backend/requirements-voice.txt` if the Gradio demo environment is not already configured. The API loads the speech models on first use. IndicConformer requires access to AI4Bharat's gated Hugging Face repository if its files are not already cached.
+---
 
-- With the organization upload key, send `POST /v1/voice` as multipart with a WAV in `file` and `consent=true`. Upload 10–20 seconds of one speaker. The upload replaces the organization's reference and stays on the backend.
-- For local speech recognition, send a WAV and an IndicConformer `language` code to `POST /v1/transcribe`. `GET /v1/voice-languages` lists all 22 codes. Omit the language to use Groq auto-detection.
-- `POST /v1/ask` returns `audio_id` when playback is available. Use the same organization's query key to fetch a WAV from `GET /v1/answers/{audio_id}/audio` within 24 hours. XTTS clones the reference in its supported languages, including Hindi and English. Assamese uses the built-in Assamese voice. Other languages outside XTTS are returned as text.
+## 4. API Endpoints & Workflow
+
+| Method & Path | Auth Key | Purpose |
+|---|---|---|
+| `GET /health` | None | Check server status and `GROQ_API_KEY` configuration |
+| `GET /v1/voice-languages` | None | List all 22 supported IndicConformer STT languages |
+| `GET /v1/tts-languages` | None | List supported TTS languages (for UI dropdowns) |
+| `POST /v1/organizations` | `BACKEND_ADMIN_KEY` | Create an organization (`{"name": "..."}`); returns `upload_key` and `query_key` |
+| `POST /v1/documents` | `upload_key` | Upload searchable `.pdf`, `.txt`, or `.md` (max 10 MiB, 300 pages) |
+| `POST /v1/voice` | `upload_key` | Upload reference `.wav` (3–10 s, `consent=true`, optional `ref_text`) |
+| `POST /v1/transcribe` | `query_key` | Transcribe audio (language set = local IndicConformer WAV; omitted = Groq Whisper auto-detect) |
+| `POST /v1/ask` | `query_key` | Ask a question; optionally select a target language for cross-language answers |
+| `GET /v1/answers/{audio_id}/audio` | `query_key` | Stream/download the cloned `.wav` answer (cached on disk for instant repeat playback) |
+
+### Typical Flow
+
+1. **Create an organization** with `POST /v1/organizations` using `BACKEND_ADMIN_KEY`.
+2. **Upload documents** with `POST /v1/documents` using the `upload_key`.
+3. **Upload a reference voice** with `POST /v1/voice` using the `upload_key`.
+4. **(Optional) Transcribe a spoken question** with `POST /v1/transcribe` using the `query_key`.
+5. **Ask a question** with `POST /v1/ask` using the `query_key`.
+6. **Fetch the cloned-voice answer** from `GET /v1/answers/{audio_id}/audio`.
+
+---
+
+## 5. Supported Languages
+
+### Speech-to-Text (`POST /v1/transcribe`)
+
+**Local IndicConformer** (22 languages, WAV only):
+
+`as`, `bn`, `brx`, `doi`, `gu`, `hi`, `kn`, `ks`, `kok`, `mai`, `ml`, `mni`, `mr`, `ne`, `or`, `pa`, `sa`, `sat`, `sd`, `ta`, `te`, `ur`
+
+**Groq Whisper** (auto-detect):
+
+`.wav`, `.mp3`, `.m4a`, `.webm`, `.ogg`, `.flac`, `.mp4`, `.mpeg`, `.mpga`
+
+### TTS Voice Cloning (`POST /v1/ask` → `/v1/answers/{audio_id}/audio`)
+
+**Dhee-Indic-F5** (12 languages):
+
+| Code | Language | Code | Language |
+|---|---|---|---|
+| `as` | Assamese | `ml` | Malayalam |
+| `bn` | Bengali | `mr` | Marathi |
+| `en` | Indian English | `or` | Odia |
+| `gu` | Gujarati | `pa` | Punjabi |
+| `hi` | Hindi | `ta` | Tamil |
+| `kn` | Kannada | `te` | Telugu |
+
+**XTTS-v2 Fallback** (15 additional languages):
+
+`ar`, `cs`, `de`, `es`, `fr`, `hu`, `it`, `ja`, `ko`, `nl`, `pl`, `pt`, `ru`, `tr`, `zh-cn`
+
+---
+
+## 6. Key Features for Live Demos
+
+- **Cross-Language Answers** — In `POST /v1/ask`, pick any language from the language dropdown. For example, ask in Hindi and select `bn` to get and hear the answer in Bengali.
+- **Instant Cache** — Repeated `(question, target_language)` pairs return `"cached": true` immediately from `qa_cache` and play the saved WAV from `backend/storage/cache/`. Uploading new documents or a new reference voice automatically invalidates stale cache entries.
+- **Groq Offline Fallback** — If Groq is unreachable or rate-limited, `/v1/ask` returns `"fallback_used": true` with the best-matching sentences extracted locally via SQLite FTS5.

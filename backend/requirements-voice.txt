@@ -1,9 +1,0 @@
--r requirements.txt
-coqui-tts
-gradio>=5,<6
-numpy
-onnxruntime
-soundfile
-torch
-torchaudio
-transformers>=4.50,<5

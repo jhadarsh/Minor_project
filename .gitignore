@@ -1,4 +1,30 @@
-.env
+# Python virtual environment & cache (root + backend)
 .venv/
 __pycache__/
+*.py[cod]
+*$py.class
+
+# Environment variables & API keys (backend/.env)
+.env
+.env.*
+!.env.example
+
+# Backend runtime / generated files
 backend/storage/
+# Uncomment the line below if backend/data/ only holds local/uploaded files you don't want on GitHub:
+# backend/data/
+
+# Frontend dependencies & Vite build output
+Frontend/node_modules/
+Frontend/dist/
+Frontend/dist-ssr/
+Frontend/.vite/
+
+# Logs & editor/OS files
+*.log
+npm-debug.log*
+.DS_Store
+Thumbs.db
+.vscode/*
+!.vscode/extensions.json
+.idea/
